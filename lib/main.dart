@@ -17,28 +17,59 @@ final uuid = Uuid();
 class NotifyService {
   static final _notif = FlutterLocalNotificationsPlugin();
 
-static Future<void> cancelAll(String id) async {
-  await _notif.cancel(_stableId("${id}_start"));
-  await _notif.cancel(_stableId("${id}_end"));
-  await _notif.cancel(_stableId("${id}_announce"));
-  await _notif.cancel(_stableId("${id}_remind"));
+  static int _id(String id, String suffix) {
+  return _stableId("${id}_$suffix");
 }
 
-  // ★ここを追加（必須）
-  static Future<void> init() async {
-    tz.initializeTimeZones();
-    tz.setLocalLocation(tz.getLocation('Asia/Tokyo'));
+static Future<void> cancelAll(String id) async {
+  await _notif.cancel(_id(id, "start"));
+  await _notif.cancel(_id(id, "end"));
+  await _notif.cancel(_id(id, "announce"));
+  await _notif.cancel(_id(id, "remind"));
+}
 
-    
+static Future<void> testNotification() async {
+  final now = tz.TZDateTime.now(tz.local).add(const Duration(seconds: 3));
 
-    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+const android = AndroidNotificationDetails(
+  'lottery_channel',
+  '抽選通知',
+  channelDescription: '抽選アプリ通知',
+  importance: Importance.max,
+  priority: Priority.high,
+);
 
-    const settings = InitializationSettings(
-      android: android,
-    );
+  await _notif.zonedSchedule(
+    999999,
+    "通知テスト",
+    "これはテスト通知です",
+    now,
+    const NotificationDetails(android: android),
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,    uiLocalNotificationDateInterpretation:
+        UILocalNotificationDateInterpretation.absoluteTime,
+  );
+}
+///通知権限
+static Future<void> init() async {
+  tz.initializeTimeZones();
+  tz.setLocalLocation(tz.getLocation('Asia/Tokyo'));
 
-    await _notif.initialize(settings);
-  }
+  const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+
+  const settings = InitializationSettings(android: android);
+
+  await _notif.initialize(settings);
+
+  final androidImpl = _notif
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+
+  // 🔥 Android 13+ 権限（強制）
+  await androidImpl?.requestNotificationsPermission();
+
+  // 🔥 追加（重要）
+  await androidImpl?.requestExactAlarmsPermission();
+}
 
 
 static int _stableId(String key) {
@@ -63,17 +94,14 @@ static Future<void> schedule({
 
 if (target.isBefore(now.add(const Duration(seconds: 10)))) return;
 
-  // ★これ追加（超重要）
-  await _notif.cancel(_stableId(id));
-
-  await _notif.zonedSchedule(
+    await _notif.zonedSchedule(
     _stableId(id),
     title,
     body,
     target,
     NotificationDetails(android: android),
-    androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-    uiLocalNotificationDateInterpretation:
+androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle, 
+   uiLocalNotificationDateInterpretation:
         UILocalNotificationDateInterpretation.absoluteTime,
   );
 }
@@ -301,31 +329,31 @@ class LotteryCore {
   static final _stream = StreamController<void>.broadcast();
   static Stream<void> get stream => _stream.stream;
   static List<int> reminderDays = [3, 1, 0];
-  static Future<void> load() async {
+static Future<void> load() async {
   final p = await SharedPreferences.getInstance();
   final raw = p.getString("data");
- 
-  
-try {
-  if (raw != null) {
-    final decoded = jsonDecode(raw);
 
-    list = (decoded as List)
-        .map((e) => Lottery.fromJson(e))
-        .toList();
+  try {
+    if (raw != null) {
+      final decoded = jsonDecode(raw);
 
-    // 移行
-    for (final l in list) {
-      if (l.startDate.isEmpty) l.startDate = l.drawDate;
-      if (l.endDate.isEmpty) l.endDate = l.drawDate;
+      list = (decoded as List)
+          .map((e) => Lottery.fromJson(e))
+          .toList();
+
+      for (final l in list) {
+        if (l.startDate.isEmpty) l.startDate = l.drawDate;
+        if (l.endDate.isEmpty) l.endDate = l.drawDate;
+      }
     }
-  }
-} catch (e) {
-  print("JSON ERROR: $e");
-  print("RAW DATA: $raw");
-}
 
-_stream.add(null);
+    _stream.add(null);
+  } catch (e) {
+    print("JSON ERROR: $e");
+    print("RAW DATA: $raw");
+
+    _stream.add(null);
+  }
 }
 
   static Future<void> save() async {
@@ -550,6 +578,7 @@ class _HomePageState extends State<HomePage> {
   bool showWonOnly = false;
   bool showUnappliedOnly = false;
   bool showDeadlineOnly = false;
+  bool hideApplied = false;
 
   SortType sortType = SortType.priority;
 
@@ -581,9 +610,15 @@ Future<void> openUrl(String url) async {
 
     final uri = Uri.parse(fixed);
 
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("URLを開けませんでした")),
+    final ok = await launchUrl(
+      uri,
+      mode: LaunchMode.externalApplication,
+    );
+
+    if (!ok) {
+      await launchUrl(
+        uri,
+        mode: LaunchMode.inAppBrowserView,
       );
     }
   } catch (e) {
@@ -705,9 +740,10 @@ List<IconData> _icons(Lottery l) {
 
 final baseList = [...LotteryCore.list];
 final filteredList = baseList
-    .where((e) =>
-        !e.isDeleted &&
-        !e.archived &&
+      .where((e) =>
+          !e.isDeleted &&
+          !e.archived &&
+          (!hideApplied || !e.applied) &&
         (
           keyword.isEmpty ||
           e.item.toLowerCase().contains(keyword.toLowerCase()) ||
@@ -793,6 +829,17 @@ final filteredList = baseList
                 onPressed: () => setState(() => showFavOnly = !showFavOnly),
               ),
               IconButton(
+                tooltip: "抽選済み非表示",
+                icon: Icon(
+                  hideApplied ? Icons.visibility_off : Icons.visibility,
+                ),
+                onPressed: () {
+                  setState(() {
+                    hideApplied = !hideApplied;
+                  });
+                },
+              ),
+              IconButton(
                 tooltip: "当選のみ表示",
                 icon: const Icon(Icons.emoji_events),
                 onPressed: () => setState(() => showWonOnly = !showWonOnly),
@@ -809,6 +856,13 @@ final filteredList = baseList
                 onPressed: () =>
                     setState(() => showDeadlineOnly = !showDeadlineOnly),
               ),
+              IconButton(
+  icon: const Icon(Icons.notifications_active),
+  tooltip: "通知テスト",
+  onPressed: () {
+    NotifyService.testNotification();
+  },
+),
             ],
           ),
         body: LotteryCore.list.isEmpty
@@ -1643,9 +1697,8 @@ class _CollectPageState extends State<CollectPage> {
 Future<void> addToLottery(Map<String, String> data) async {
   final l = Lottery(
     id: uuid.v4(),
-item: (data["item"] ?? "不明").toString(),
-store: (data["store"] ?? "不明").toString(),
-    category: data["category"] ?? "",
+store: (data["store"] ?? "").toString().isEmpty ? "不明" : data["store"].toString(),
+item: (data["item"] ?? "").toString().isEmpty ? "不明" : data["item"].toString(),    category: data["category"] ?? "",
 
     drawDate: "",
 drawTime: "",
